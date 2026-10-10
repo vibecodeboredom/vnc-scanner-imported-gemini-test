@@ -1,0 +1,6 @@
+# One target per line. Blank lines and #-comments are ignored.
+# Supported formats:
+127.0.0.1
+10.0.0.0/24
+10.0.0.1-50
+192.168.1.10-192.168.1.20

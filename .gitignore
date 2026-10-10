@@ -1,0 +1,6 @@
+results/
+__pycache__/
+*.pyc
+# Keep the example creds file, ignore any private/real ones:
+creds/*.local.txt
+targets.txt

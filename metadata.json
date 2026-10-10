@@ -1,0 +1,8 @@
+{
+  "name": "VNC RFB Service Scanner & Security Auditor",
+  "description": "High-performance automated VNC (RFB protocol) scanner and credential tester with CIDR target expansion, live hit detection, and CSV audit reporting.",
+  "permissions": [],
+  "capabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
