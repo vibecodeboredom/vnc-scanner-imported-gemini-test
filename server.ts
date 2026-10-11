@@ -577,7 +577,49 @@ export function expandTarget(spec: string): string[] {
   if (isValidIPv4(spec)) {
     return [spec];
   }
+
+  // Support hostnames, domains, localhost, or single entries
+  const cleanHost = spec.replace(/^(vnc|rfb|tcp|http|https):\/\//i, '').trim();
+  if (cleanHost.toLowerCase() === 'localhost') {
+    return ['127.0.0.1'];
+  }
+  // If entry contains explicit port like host:5900, strip the port for expandTarget (ports handled by parseTargetLine)
+  const hpMatch = cleanHost.match(/^([^:]+):(\d+)$/);
+  if (hpMatch) {
+    const h = hpMatch[1].trim();
+    if (h.toLowerCase() === 'localhost') return ['127.0.0.1'];
+    return [h];
+  }
+  if (/^[a-zA-Z0-9.-]+$/.test(cleanHost)) {
+    return [cleanHost];
+  }
+
   return [];
+}
+
+export function parseTargetLine(line: string, defaultPorts: number[]): { host: string; ports: number[] }[] {
+  let clean = line.trim();
+  if (!clean || clean.startsWith('#')) return [];
+
+  clean = clean.replace(/^(vnc|rfb|tcp|http|https):\/\//i, '').trim();
+
+  let explicitPort: number | null = null;
+  const hostPortMatch = clean.match(/^([^:\/\s]+):(\d+)$/);
+  if (hostPortMatch) {
+    clean = hostPortMatch[1].trim();
+    const p = parseInt(hostPortMatch[2], 10);
+    if (!isNaN(p) && p >= 1 && p <= 65535) {
+      explicitPort = p;
+    }
+  }
+
+  const hosts = expandTarget(clean);
+  const portsToUse = explicitPort !== null ? [explicitPort] : defaultPorts;
+
+  return hosts.map((host) => ({
+    host,
+    ports: portsToUse,
+  }));
 }
 
 export interface PortInfo {
@@ -585,10 +627,13 @@ export interface PortInfo {
   display: string;
 }
 
+export const DEFAULT_COMMON_VNC_PORTS_STR = '5900, 5901, 5902, 5903, 5904, 5905, 5800, 5801';
+export const DEFAULT_COMMON_VNC_PORTS_LIST = [5900, 5901, 5902, 5903, 5904, 5905, 5800, 5801];
+
 export function parsePorts(spec: string): number[] {
   const ports: number[] = [];
   const seen = new Set<number>();
-  if (!spec || !spec.trim()) return [5900];
+  if (!spec || !spec.trim()) return [...DEFAULT_COMMON_VNC_PORTS_LIST];
 
   // Comma is used to separate numbers and skip numbers (e.g. "5900, 5902, 5905" or ":0, :2, :5")
   const chunks = spec.split(',').map((s) => s.trim()).filter(Boolean);
@@ -633,7 +678,7 @@ export function parsePorts(spec: string): number[] {
     }
   }
 
-  return ports.length > 0 ? ports : [5900];
+  return ports.length > 0 ? ports : [...DEFAULT_COMMON_VNC_PORTS_LIST];
 }
 
 export function getPortDetails(ports: number[]): PortInfo[] {
@@ -641,6 +686,8 @@ export function getPortDetails(ports: number[]): PortInfo[] {
     let display = '';
     if (p >= 5900 && p <= 5999) {
       display = `:${p - 5900}`;
+    } else if (p >= 5800 && p <= 5899) {
+      display = `HTTP :${p - 5800}`;
     }
     return { port: p, display };
   });
@@ -1032,12 +1079,18 @@ function createProxiedSocket(
 // Real RFB Socket Protocol Engine
 // ---------------------------------------------------------------------------
 function recvExact(
-  socket: net.Socket,
+  socket: net.Socket & { _rxBuf?: Buffer },
   n: number,
   timeoutMs: number
 ): Promise<Buffer> {
+  const existing = socket._rxBuf || Buffer.alloc(0);
+  if (existing.length >= n) {
+    const res = existing.subarray(0, n);
+    socket._rxBuf = existing.subarray(n);
+    return Promise.resolve(res);
+  }
+
   return new Promise((resolve, reject) => {
-    let buf = Buffer.alloc(0);
     let isSettled = false;
 
     function cleanup() {
@@ -1057,10 +1110,11 @@ function recvExact(
     }, timeoutMs);
 
     function onData(chunk: Buffer) {
-      buf = Buffer.concat([buf, chunk]);
-      if (buf.length >= n) {
+      socket._rxBuf = Buffer.concat([socket._rxBuf || Buffer.alloc(0), chunk]);
+      if (socket._rxBuf.length >= n) {
         cleanup();
-        const ret = buf.subarray(0, n);
+        const ret = socket._rxBuf.subarray(0, n);
+        socket._rxBuf = socket._rxBuf.subarray(n);
         resolve(ret);
       }
     }
@@ -1081,6 +1135,30 @@ function recvExact(
   });
 }
 
+async function recvRfbBanner(
+  socket: net.Socket,
+  timeoutMs: number
+): Promise<{ raw: string; major: number; minor: number }> {
+  let lineBuf = Buffer.alloc(0);
+  while (!lineBuf.includes(0x0a)) {
+    const chunk = await recvExact(socket, 1, timeoutMs);
+    lineBuf = Buffer.concat([lineBuf, chunk]);
+    if (lineBuf.length > 64) {
+      throw new Error('RFB banner exceeded maximum length');
+    }
+  }
+  const bannerStr = lineBuf.toString('latin1').replace(/\r?\n$/, '');
+  const match = bannerStr.match(/RFB\s+(\d{3})\.(\d{3})/i);
+  if (!match) {
+    throw new Error(`malformed RFB version banner: ${bannerStr}`);
+  }
+  return {
+    raw: bannerStr,
+    major: parseInt(match[1], 10),
+    minor: parseInt(match[2], 10),
+  };
+}
+
 async function probeRFB(
   ip: string,
   port: number,
@@ -1089,21 +1167,9 @@ async function probeRFB(
 ): Promise<{ version: [number, number]; securityTypes: number[] }> {
   const socket = await createProxiedSocket(ip, port, timeoutMs, proxy);
   try {
-    // Read 12-byte banner: "RFB 003.008\n"
-    const banner = await recvExact(socket, 12, timeoutMs);
-    const bannerStr = banner.toString('latin1');
-    if (!bannerStr.startsWith('RFB ') || !bannerStr.endsWith('\n')) {
-      socket.destroy();
-      throw new Error('not an RFB service');
-    }
-
-    const match = bannerStr.match(/RFB (\d{3})\.(\d{3})/);
-    if (!match) {
-      socket.destroy();
-      throw new Error('malformed RFB version banner');
-    }
-    const serverMajor = parseInt(match[1], 10);
-    const serverMinor = parseInt(match[2], 10);
+    const bannerInfo = await recvRfbBanner(socket, timeoutMs);
+    const serverMajor = bannerInfo.major;
+    const serverMinor = bannerInfo.minor;
     const serverVersion: [number, number] = [serverMajor, serverMinor];
 
     // Negotiate highest compatible version
@@ -1154,15 +1220,9 @@ async function tryVncAuth(
 ): Promise<boolean> {
   const socket = await createProxiedSocket(ip, port, timeoutMs, proxy);
   try {
-    const banner = await recvExact(socket, 12, timeoutMs);
-    const bannerStr = banner.toString('latin1');
-    const match = bannerStr.match(/RFB (\d{3})\.(\d{3})/);
-    if (!match) {
-      socket.destroy();
-      return false;
-    }
-    const serverMajor = parseInt(match[1], 10);
-    const serverMinor = parseInt(match[2], 10);
+    const bannerInfo = await recvRfbBanner(socket, timeoutMs);
+    const serverMajor = bannerInfo.major;
+    const serverMinor = bannerInfo.minor;
 
     let ourBanner = 'RFB 003.008\n';
     if (serverMajor === 3 && serverMinor < 7) {
@@ -1688,30 +1748,43 @@ async function scanHost(
       return res;
     }
 
-    if (!probe.securityTypes.includes(SEC_VNCAUTH)) {
-      res.security = 'unsupported';
-      res.error = `security types ${JSON.stringify(probe.securityTypes)} not supported`;
-      return res;
-    }
+    if (probe.securityTypes.includes(SEC_VNCAUTH)) {
+      res.security = 'vncauth';
+      if (!checkAuth || passwords.length === 0) {
+        return res;
+      }
 
-    res.security = 'vncauth';
-    if (!checkAuth || passwords.length === 0) {
-      return res;
-    }
-
-    for (const pwd of passwords) {
-      try {
-        const ok = await tryVncAuth(ip, port, pwd, timeoutMs, proxy);
-        if (ok) {
-          res.auth_success = true;
-          res.winner = ['password', pwd];
+      for (const pwd of passwords) {
+        try {
+          const ok = await tryVncAuth(ip, port, pwd, timeoutMs, proxy);
+          if (ok) {
+            res.auth_success = true;
+            res.winner = ['password', pwd];
+            break;
+          }
+        } catch (authErr: any) {
+          res.error = authErr.message || 'connection dropped during auth';
           break;
         }
-      } catch (authErr: any) {
-        res.error = authErr.message || 'connection dropped during auth';
-        break;
       }
+      return res;
     }
+
+    // Server uses other security type (e.g. 16: Tight, 18: TLS, 19: VeNCrypt, 20: SASL, 5: RA2)
+    const secNames: Record<number, string> = {
+      1: 'none',
+      2: 'vncauth',
+      5: 'RA2',
+      16: 'Tight',
+      17: 'Ultra',
+      18: 'TLS',
+      19: 'VeNCrypt',
+      20: 'SASL',
+      21: 'MD5',
+    };
+    const namedSec = probe.securityTypes.map((t) => secNames[t] || `type_${t}`).join(', ');
+    res.security = namedSec;
+    return res;
   } catch (err: any) {
     const msg = err.message || '';
     const isTargetClosedOrUnreach =
@@ -1829,7 +1902,7 @@ if (fs.existsSync(credsPath)) {
 app.get('/api/config', (_req: Request, res: Response) => {
   res.json({
     defaultCreds,
-    defaultPorts: '5900',
+    defaultPorts: DEFAULT_COMMON_VNC_PORTS_STR,
     demoTargets: [
       {
         name: 'Local Test Lab (Simulated VNC on 5900-5903)',
@@ -1841,8 +1914,14 @@ app.get('/api/config', (_req: Request, res: Response) => {
       {
         name: 'Local Subnet (/28 range demo)',
         spec: '127.0.0.1-5',
-        ports: '5900,5901',
+        ports: '5900, 5901',
         description: 'Demonstrates target range expansion and parallel worker scanning',
+      },
+      {
+        name: 'Common VNC Ports (Standard Displays & HTTP Web VNC)',
+        spec: '127.0.0.1',
+        ports: DEFAULT_COMMON_VNC_PORTS_STR,
+        description: 'Probes common RFB displays :0-:5 (5900-5905) and HTTP Java/HTML5 VNC web ports (5800-5801)',
       },
       {
         name: 'Skip Ports Demo (:0, :2, :5)',
@@ -1874,35 +1953,43 @@ app.get('/api/config', (_req: Request, res: Response) => {
 
 // 2. Parse & Preview Targets & Ports (with comma-skip details)
 app.post('/api/targets/preview', (req: Request, res: Response) => {
-  const { rawTargets = '', rawPorts = '5900' } = req.body;
+  const { rawTargets = '', rawPorts = DEFAULT_COMMON_VNC_PORTS_STR } = req.body;
   const lines = String(rawTargets)
     .split(/\r?\n/)
     .map((l) => l.trim())
     .filter((l) => l && !l.startsWith('#'));
 
+  const parsedDefaultPorts = parsePorts(String(rawPorts));
+  const seenJobs = new Set<string>();
   const expandedIps: string[] = [];
   const seenIps = new Set<string>();
+  let totalJobs = 0;
 
   for (const line of lines) {
-    const ips = expandTarget(line);
-    for (const ip of ips) {
-      if (!seenIps.has(ip)) {
-        seenIps.add(ip);
-        expandedIps.push(ip);
+    const items = parseTargetLine(line, parsedDefaultPorts);
+    for (const item of items) {
+      if (!seenIps.has(item.host)) {
+        seenIps.add(item.host);
+        expandedIps.push(item.host);
+      }
+      for (const p of item.ports) {
+        const key = `${item.host}:${p}`;
+        if (!seenJobs.has(key)) {
+          seenJobs.add(key);
+          totalJobs++;
+        }
       }
     }
   }
 
-  const ports = parsePorts(String(rawPorts));
-  const detailedPorts = getPortDetails(ports);
-  const totalJobs = expandedIps.length * ports.length;
+  const detailedPorts = getPortDetails(parsedDefaultPorts);
 
   res.json({
     targetsCount: expandedIps.length,
-    portsCount: ports.length,
+    portsCount: parsedDefaultPorts.length,
     totalScans: totalJobs,
     sampleIps: expandedIps.slice(0, 10),
-    samplePorts: ports,
+    samplePorts: parsedDefaultPorts,
     detailedPorts: detailedPorts.slice(0, 20),
   });
 });
@@ -2127,7 +2214,7 @@ app.post('/api/scan/start', async (req: Request, res: Response) => {
 
   const {
     targets = '127.0.0.1',
-    ports = '5900',
+    ports = DEFAULT_COMMON_VNC_PORTS_STR,
     checkAuth = false,
     passwords = defaultCreds,
     workers = 10,
@@ -2157,23 +2244,20 @@ app.post('/api/scan/start', async (req: Request, res: Response) => {
     .map((l) => l.trim())
     .filter((l) => l && !l.startsWith('#'));
 
-  const targetIps: string[] = [];
-  const seenIps = new Set<string>();
+  const parsedDefaultPorts = parsePorts(String(ports));
+  const jobList: { ip: string; port: number }[] = [];
+  const seenJobs = new Set<string>();
 
   for (const line of lines) {
-    for (const ip of expandTarget(line)) {
-      if (!seenIps.has(ip)) {
-        seenIps.add(ip);
-        targetIps.push(ip);
+    const items = parseTargetLine(line, parsedDefaultPorts);
+    for (const item of items) {
+      for (const p of item.ports) {
+        const key = `${item.host}:${p}`;
+        if (!seenJobs.has(key)) {
+          seenJobs.add(key);
+          jobList.push({ ip: item.host, port: p });
+        }
       }
-    }
-  }
-
-  const parsedPorts = parsePorts(String(ports));
-  const jobList: { ip: string; port: number }[] = [];
-  for (const ip of targetIps) {
-    for (const p of parsedPorts) {
-      jobList.push({ ip, port: p });
     }
   }
 

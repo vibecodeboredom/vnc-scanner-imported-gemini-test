@@ -96,7 +96,7 @@ interface ProxyTestItem {
 export default function App() {
   // Input configuration
   const [targetsText, setTargetsText] = useState<string>('127.0.0.1\n10.0.0.1-5\n192.168.1.0/28');
-  const [portsText, setPortsText] = useState<string>('5900, 5902, 5905');
+  const [portsText, setPortsText] = useState<string>('5900, 5901, 5902, 5903, 5904, 5905, 5800, 5801');
   const [checkAuth, setCheckAuth] = useState<boolean>(true);
   const [passwords, setPasswords] = useState<string[]>(['password', 'admin', '123456', 'root', '1234']);
   const [newPassword, setNewPassword] = useState<string>('');
@@ -1251,10 +1251,27 @@ export default function App() {
                     <span className="text-slate-500 py-0.5 font-medium">Quick Presets:</span>
                     <button
                       type="button"
+                      onClick={() => setPortsText('5900, 5901, 5902, 5903, 5904, 5905, 5800, 5801')}
+                      className="px-2 py-0.5 bg-gradient-to-r from-cyan-900/90 to-blue-900/90 hover:from-cyan-800 hover:to-blue-800 text-cyan-200 rounded border border-cyan-700/80 font-medium transition shadow-sm"
+                      title="Common VNC display ports (:0-:5) and HTTP web viewer ports (5800-5801)"
+                    >
+                      ★ Common Ports (:0-:5 &amp; Web)
+                    </button>
+                    <button
+                      type="button"
                       onClick={() => setPortsText('5900')}
                       className="px-2 py-0.5 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded border border-slate-700 transition"
+                      title="Single default port (:0)"
                     >
-                      Default (:0)
+                      Port 5900 (:0)
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setPortsText('5900, 5901, 5902, 5903')}
+                      className="px-2 py-0.5 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded border border-slate-700 transition"
+                      title="Standard 4 virtual displays (:0-:3)"
+                    >
+                      Displays :0-:3 (5900-5903)
                     </button>
                     <button
                       type="button"
@@ -1266,17 +1283,11 @@ export default function App() {
                     </button>
                     <button
                       type="button"
-                      onClick={() => setPortsText('5900-5903')}
+                      onClick={() => setPortsText('5900-5910')}
                       className="px-2 py-0.5 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded border border-slate-700 transition"
+                      title="Wide range of 11 displays (:0-:10)"
                     >
-                      Range (:0-:3)
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setPortsText('5900-5902, 5905')}
-                      className="px-2 py-0.5 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded border border-slate-700 transition"
-                    >
-                      Range + Skip (:0-:2, :5)
+                      Wide Range (:0-:10)
                     </button>
                   </div>
 
