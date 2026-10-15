@@ -1,5 +1,6 @@
 # VNC Scanner
 # WARNING ⚠️ THIS IS VIBECODED BY GEMINI 3.8 FLASH, PLEASE CHECK THE FORK ⚠️
+# Original Repository here: https://github.com/Inatuso/vnc-scanner
 Automated VNC (RFB) scanner. Give it targets — single IPs, ranges, or subnets —
 and it will:
 
